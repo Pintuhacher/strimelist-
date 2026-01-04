@@ -1,0 +1,7 @@
+streamlit>=1.20
+mediapipe>=0.10.0
+opencv-python>=4.6.0
+Pillow>=9.0.0
+numpy>=1.23.0
+# Optional (for real-time webcam in Streamlit):
+# streamlit-webrtc>=0.68.0
