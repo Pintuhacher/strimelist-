@@ -1,113 +1,59 @@
-import streamlit as st
+from typing import get_args
+
 import cv2
 import numpy as np
+import streamlit as st
 from PIL import Image
-import mediapipe as mp
 
-st.set_page_config(page_title="Simple AR Photo (Streamlit + MediaPipe)", layout="centered")
-st.title("Simple AR Photo — upload or take a photo")
-st.write("This demo uses MediaPipe Face Mesh to place a simple sunglasses overlay on detected faces.")
+from fast_alpr import ALPR
+from fast_alpr.default_detector import PlateDetectorModel
+from fast_alpr.default_ocr import OcrModel
 
-mp_face = mp.solutions.face_mesh
+# Default models
+DETECTOR_MODELS = list(get_args(PlateDetectorModel))
+OCR_MODELS = list(get_args(OcrModel))
+# Put global OCR first
+OCR_MODELS.remove("cct-s-v1-global-model")
+OCR_MODELS.insert(0, "cct-s-v1-global-model")
 
-def pil_to_cv2(img_pil: Image.Image) -> np.ndarray:
-    return cv2.cvtColor(np.array(img_pil), cv2.COLOR_RGB2BGR)
+st.title("CAR NUMBER PLATE DETECTION SYSTEM USING YOLO")
 
-def cv2_to_pil(img_cv2: np.ndarray) -> Image.Image:
-    img_rgb = cv2.cvtColor(img_cv2, cv2.COLOR_BGR2RGB)
-    return Image.fromarray(img_rgb)
+# Sidebar for selecting models
+detector_model = st.sidebar.selectbox("Choose Detector Model", DETECTOR_MODELS)
+ocr_model = st.sidebar.selectbox("Choose OCR Model", OCR_MODELS)
 
-def apply_simple_sunglasses(cv_img: np.ndarray) -> np.ndarray:
-    h, w = cv_img.shape[:2]
-    with mp_face.FaceMesh(static_image_mode=True, max_num_faces=1,
-                          refine_landmarks=True, min_detection_confidence=0.5) as face_mesh:
-        rgb = cv2.cvtColor(cv_img, cv2.COLOR_BGR2RGB)
-        results = face_mesh.process(rgb)
-        if not results.multi_face_landmarks:
-            return cv_img  # no face detected
+# Load image
+uploaded_file = st.file_uploader("Upload an image of a vehicle with a license plate", type=["jpg", "jpeg", "png"])
 
-        for face_landmarks in results.multi_face_landmarks:
-            # landmark indices for left/right eye outer corners on MediaPipe Face Mesh
-            left_outer = face_landmarks.landmark[33]   # left outer
-            right_outer = face_landmarks.landmark[263] # right outer
-            left_inner = face_landmarks.landmark[133]  # left inner
-            right_inner = face_landmarks.landmark[362] # right inner
-            nose_tip = face_landmarks.landmark[1]
+if uploaded_file is not None:
+    # Convert uploaded file to a format compatible with OpenCV
+    img = Image.open(uploaded_file)
+    img_array = np.array(img.convert("RGB"))  # Convert to RGB if needed
+    st.image(img, caption="Uploaded Image", use_container_width=True)
 
-            # Convert to pixel coords
-            def to_px(lm):
-                return np.array([int(lm.x * w), int(lm.y * h)])
+    # Initialize ALPR with selected models
+    alpr = ALPR(detector_model=detector_model, ocr_model=ocr_model)
 
-            p_left_outer = to_px(left_outer)
-            p_right_outer = to_px(right_outer)
-            p_left_inner = to_px(left_inner)
-            p_right_inner = to_px(right_inner)
-            p_nose = to_px(nose_tip)
+    # Run ALPR on the uploaded image
+    st.write("Processing...")
+    results = alpr.predict(img_array)
 
-            # Compute center, width, height, and angle for sunglasses
-            eye_center = (p_left_outer + p_right_outer) // 2
-            eye_width = int(np.linalg.norm(p_right_outer - p_left_outer) * 1.6)
-            eye_height = int(eye_width * 0.4)
+    # Draw predictions on the image
+    annotated_img_array = alpr.draw_predictions(img_array)
 
-            # Angle between eyes
-            delta = p_right_outer - p_left_outer
-            angle = np.degrees(np.arctan2(delta[1], delta[0]))
+    # Convert the annotated image back to display in Streamlit
+    annotated_img = Image.fromarray(annotated_img_array)
+    st.image(annotated_img, caption="Annotated Image with OCR Results", use_container_width=True)
 
-            # Create overlay with alpha channel
-            overlay = np.zeros((h, w, 4), dtype=np.uint8)
-
-            # Build a rotated rectangle for sunglasses (as a filled polygon)
-            rect_center = tuple(eye_center)
-            box = cv2.boxPoints(((rect_center[0], rect_center[1]), (eye_width, eye_height), angle))
-            box = np.int0(box)
-
-            # Draw filled dark shape (sunglass lenses)
-            cv2.fillConvexPoly(overlay, box, (10, 10, 10, 220))  # semi-opaque dark
-
-            # Add a small nose bridge
-            nose_bridge_w = max(6, eye_width // 12)
-            nose_bridge_h = max(6, eye_height // 3)
-            bridge_center = (int((p_left_inner[0] + p_right_inner[0]) / 2), int((p_left_inner[1] + p_right_inner[1]) / 2))
-            cv2.ellipse(overlay, bridge_center, (nose_bridge_w, nose_bridge_h), angle, 0, 360, (20, 20, 20, 220), -1)
-
-            # Composite overlay onto original image
-            bgr = cv_img.copy()
-            # split alpha and use blending
-            alpha = overlay[:, :, 3] / 255.0
-            for c in range(3):
-                bgr[:, :, c] = (overlay[:, :, c] * alpha + bgr[:, :, c] * (1 - alpha)).astype(np.uint8)
-
-            cv_img = bgr
-
-    return cv_img
-
-st.sidebar.markdown("### Input")
-uploaded = st.sidebar.file_uploader("Upload a photo", type=["jpg", "jpeg", "png"])
-cam_input = st.sidebar.camera_input("Or take a photo (webcam)")
-
-image_source = None
-if cam_input is not None:
-    image_source = Image.open(cam_input)
-elif uploaded is not None:
-    image_source = Image.open(uploaded)
-
-if image_source is None:
-    st.info("Please upload a photo or take one with your webcam (camera).")
-    st.stop()
-
-# Convert and process
-img_cv2 = pil_to_cv2(image_source.convert("RGB"))
-st.write("Original photo:")
-st.image(image_source, use_column_width=True)
-
-with st.spinner("Detecting face and applying AR overlay..."):
-    output_cv2 = apply_simple_sunglasses(img_cv2)
-    output_pil = cv2_to_pil(output_cv2)
-
-st.write("AR-applied photo:")
-st.image(output_pil, use_column_width=True)
-
-st.markdown("---")
-st.write("Notes:")
-st.write("- This is a minimal demo. For smoother/animated AR on live video, consider using streamlit-webrtc or a native OpenCV window.")
-st.write("- To place PNG overlays (e.g., real sunglasses), load the PNG with alpha and compute transform (scale + rotate) to match the face landmarks.")
+    # Display OCR results in text format for more detail
+    if results:
+        st.write("**OCR Results:**")
+        for result in results:
+            # Access the detection and OCR attributes from ALPRResult
+            plate_text = result.ocr.text if result.ocr else "N/A"
+            plate_confidence = result.ocr.confidence if result.ocr else 0.0
+            st.write(f"- Detected Plate: `{plate_text}` with confidence `{plate_confidence:.2f}`")
+    else:
+        st.write("No license plate detected 😔.")
+else:
+    st.write("Please upload an image to continue.")
